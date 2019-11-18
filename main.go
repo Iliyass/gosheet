@@ -3,46 +3,79 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"io/ioutil"
+	"flag"
+	"fmt"
+	"log"
 	"net/http"
+	"os"
 
+	"../sheet-api/sheet"
+	"github.com/joho/godotenv"
+	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
-	"gopkg.in/Iwark/spreadsheet.v2"
 )
 
-func connect() *spreadsheet.Service {
-	data, err := ioutil.ReadFile("client_secret.json")
-	if err != nil {
-		panic(err)
+var config *oauth2.Config
+
+// init is invoked before main()
+func init() {
+	// loads values from .env into the system
+	if err := godotenv.Load(); err != nil {
+		log.Print("No .env file found")
 	}
-	conf, err := google.JWTConfigFromJSON(data, spreadsheet.Scope)
-	if err != nil {
-		panic(err)
+	config = &oauth2.Config{
+		ClientID:     getEnv("GOOGLE_OAUTH_CLIENTID"),
+		ClientSecret: getEnv("GOOGLE_OAUTH_CLIENTSECRET"),
+		Endpoint:     google.Endpoint,
+		RedirectURL:  getEnv("GOOGLE_OAUTH_REDIRECT_URL"),
+		Scopes: []string{
+			"https://www.googleapis.com/auth/spreadsheets.readonly",
+			"https://www.googleapis.com/auth/spreadsheets",
+			sheet.Scope,
+		},
 	}
-	client := conf.Client(context.TODO())
-	service := spreadsheet.NewServiceWithClient(client)
-	return service
 }
 
-func handleFetch(w http.ResponseWriter, req *http.Request) {
-	s := connect()
-	spreadsheetID := "18pD5O5jXJgDBp_V7mbI1rUgeNPcyFqom6FXJOT4sRI0"
+// Simple helper function to read an environment or return a default value
+func getEnv(key string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	panic(fmt.Errorf("Env Variable is not defined %v", key))
+}
+
+func handleOAuth(w http.ResponseWriter, req *http.Request) {
+	code := req.FormValue("code")
+	ctx := context.Background()
+
+	token, err := config.Exchange(ctx, code)
+	if err != nil {
+		log.Println(err.Error())
+		http.Redirect(w, req, "/", http.StatusTemporaryRedirect)
+	}
+	client := config.Client(ctx, token)
+
+	s := sheet.NewSheet(client)
+	spreadsheetID := "19XI3VcIWi5UqPCL4FTotcZdIQAngjGiH3fLWzom59P8"
 	spreadsheet, err := s.FetchSpreadsheet(spreadsheetID)
 	if err != nil {
 		panic(err)
 	}
-	sp := []map[string]interface{}{}
-	for _, r := range spreadsheet.Sheets[0].Rows[1:] {
-		spr := map[string]interface{}{}
-		for _, rh := range spreadsheet.Sheets[0].Rows[0] {
-			spr[rh.Value] = r[rh.Column].Value
-		}
-		sp = append(sp, spr)
-	}
-	data, err := json.Marshal(sp)
+
+	data, err := json.Marshal(spreadsheet)
 	w.Write([]byte(data))
 }
+
+func handleConnect(w http.ResponseWriter, req *http.Request) {
+	url := config.AuthCodeURL("state", oauth2.AccessTypeOffline)
+	http.Redirect(w, req, url, 301)
+}
+
 func main() {
-	http.HandleFunc("/", handleFetch)
-	http.ListenAndServe(":3009", nil)
+	var port string
+	flag.StringVar(&port, "port", "3009", "port server")
+	flag.Parse()
+	http.HandleFunc("/", handleConnect)
+	http.HandleFunc("/oatuh", handleOAuth)
+	http.ListenAndServe(fmt.Sprintf(":%s", port), nil)
 }
