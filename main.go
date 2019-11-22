@@ -9,68 +9,14 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 
 	"../sheet-api/sheet"
-	"github.com/HouzuoGuo/tiedot/db"
 	"github.com/joho/godotenv"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
 
-const dbPath = "./db"
-
 var config *oauth2.Config
-var myDB *db.DB
-
-type User struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Email       string `json:"email"`
-	AccessToken string `json:"access_token"`
-}
-
-func NewUser(u map[string]interface{}) (*User, error) {
-	if _, ok := u["id"]; !ok {
-		return nil, fmt.Errorf("ID is required")
-	}
-	if _, ok := u["name"]; !ok {
-		return nil, fmt.Errorf("Name is required")
-	}
-	if _, ok := u["email"]; !ok {
-		return nil, fmt.Errorf("Name is required")
-	}
-	if _, ok := u["access_token"]; !ok {
-		return nil, fmt.Errorf("Access Token is required")
-	}
-	return &User{
-		ID:          u["id"].(string),
-		Name:        u["name"].(string),
-		Email:       u["email"].(string),
-		AccessToken: u["access_token"].(string),
-	}, nil
-}
-
-type GoogleUser struct {
-	Sub           string `json:"sub"`
-	Name          string `json:"name"`
-	GivenName     string `json:"given_name"`
-	FamilyName    string `json:"family_name"`
-	Profile       string `json:"profile"`
-	Picture       string `json:"picture"`
-	Email         string `json:"email"`
-	EmailVerified bool   `json:"email_verified"`
-	Gender        string `json:"gender"`
-	AccessToken   string `json:"access_token"`
-}
-
-func (g *GoogleUser) toMap() map[string]interface{} {
-	return map[string]interface{}{
-		"name":         g.Name,
-		"email":        g.Email,
-		"access_token": g.AccessToken,
-	}
-}
 
 // init is invoked before main()
 func init() {
@@ -91,17 +37,6 @@ func init() {
 			sheet.Scope,
 		},
 	}
-	myDB, err := db.OpenDB(dbPath)
-	if err != nil {
-		panic(err)
-	}
-
-	err = myDB.Drop("Users")
-	if !myDB.ColExists("Users") {
-		if err := myDB.Create("Users"); err != nil {
-			panic(err)
-		}
-	}
 }
 
 // Simple helper function to read an environment or return a default value
@@ -112,7 +47,7 @@ func getEnv(key string) string {
 	panic(fmt.Errorf("Env Variable is not defined %v", key))
 }
 
-func fetchUserInfo(client *http.Client) (*GoogleUser, error) {
+func fetchUserInfo(client *http.Client) (*sheet.GoogleUser, error) {
 	resp, err := client.Get("https://www.googleapis.com/oauth2/v3/userinfo")
 	if err != nil {
 		return nil, err
@@ -122,62 +57,13 @@ func fetchUserInfo(client *http.Client) (*GoogleUser, error) {
 	if err != nil {
 		return nil, err
 	}
-	var result GoogleUser
+	var result sheet.GoogleUser
 	if err := json.Unmarshal(data, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
 }
 
-func createOrGetUser(userData *GoogleUser) (*User, error) {
-	myDB, err := db.OpenDB(dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("Can't Open Database Error: %v", err)
-	}
-	if !myDB.ColExists("Users") {
-		if err := myDB.Create("Users"); err != nil {
-			return nil, fmt.Errorf("Can't Create Users Collection Error: %v", err)
-		}
-	}
-	users := myDB.Use("Users")
-	if err := users.Index([]string{"email"}); err != nil {
-		return nil, fmt.Errorf("Can't create an email index: %v", err)
-	}
-	var query interface{}
-	q := fmt.Sprintf(`[{"eq": "%v", "in": ["email"]}]`, userData.Email)
-	log.Println("Query: ", q)
-	json.Unmarshal([]byte(q), &query)
-	queryResult := make(map[int]struct{})
-	if err := db.EvalQuery(query, users, &queryResult); err != nil {
-		return nil, fmt.Errorf("Executing query has failed: %v", err)
-	}
-	// Query result are document IDs
-	for id := range queryResult {
-		// To get query result document, simply read it
-		readBack, err := users.Read(id)
-		if err != nil {
-			return nil, fmt.Errorf("Reading users with id has failed: %v", err)
-		}
-		log.Println("Got queryResult", readBack)
-		return NewUser(readBack)
-	}
-	userID, err := users.Insert(userData.toMap())
-	if err != nil {
-		return nil, fmt.Errorf("Cannot insert user: %v", err)
-	}
-	log.Println("User saved - User Id:", userID)
-	// Read document
-	readBack, err := users.Read(userID)
-	if err != nil {
-		return nil, fmt.Errorf("Cannot Read user: %v", err)
-	}
-	if err := users.Unindex([]string{"email"}); err != nil {
-		panic(err)
-	}
-	readBack["id"] = strconv.Itoa(userID)
-	log.Println("User retried - User:", readBack)
-	return NewUser(readBack)
-}
 func handleOAuth(w http.ResponseWriter, req *http.Request) {
 	code := req.FormValue("code")
 	ctx := context.Background()
@@ -191,22 +77,12 @@ func handleOAuth(w http.ResponseWriter, req *http.Request) {
 	userData, err := fetchUserInfo(client)
 	userData.AccessToken = token.AccessToken
 
-	user, err := createOrGetUser(userData)
+	user, err := sheet.CreateOrGetUser(userData)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 	data, err := json.Marshal(user)
 	w.Write([]byte(data))
-
-	// s := sheet.NewSheet(client)
-	// spreadsheetID := "19XI3VcIWi5UqPCL4FTotcZdIQAngjGiH3fLWzom59P8"
-	// spreadsheet, err := s.FetchSpreadsheet(spreadsheetID)
-	// if err != nil {
-	// 	panic(err)
-	// }
-
-	// data, err := json.Marshal(spreadsheet)
-	// w.Write([]byte(data))
 }
 
 func handleConnect(w http.ResponseWriter, req *http.Request) {
